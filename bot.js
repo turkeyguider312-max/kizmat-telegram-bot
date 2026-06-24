@@ -77,29 +77,31 @@ const CATEGORIES = [
 const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
+const n = (id) => Number(id); // всегда число для BIGINT
+
 const db = {
   async getSupplier(chatId) {
-    const r = await pool.query('SELECT * FROM suppliers WHERE chat_id=$1', [chatId]);
+    const r = await pool.query('SELECT * FROM suppliers WHERE chat_id=$1::bigint', [n(chatId)]);
     return r.rows[0] || null;
   },
   async saveSupplier(chatId, data) {
     await pool.query(`
       INSERT INTO suppliers(chat_id,name,phone,categories,supplier_id)
-      VALUES($1,$2,$3,$4,$5)
+      VALUES($1::bigint,$2,$3,$4,$5)
       ON CONFLICT(chat_id) DO UPDATE
         SET name=$2, phone=$3, categories=$4, supplier_id=COALESCE($5,suppliers.supplier_id)
-    `, [chatId, data.name, data.phone, data.categories, data.supplierId || null]);
+    `, [n(chatId), data.name, data.phone, data.categories, data.supplierId || null]);
   },
   async getCustomer(chatId) {
-    const r = await pool.query('SELECT * FROM customers WHERE chat_id=$1', [chatId]);
+    const r = await pool.query('SELECT * FROM customers WHERE chat_id=$1::bigint', [n(chatId)]);
     return r.rows[0] || null;
   },
   async saveCustomer(chatId, data) {
     await pool.query(`
       INSERT INTO customers(chat_id,name,phone,company)
-      VALUES($1,$2,$3,$4)
+      VALUES($1::bigint,$2,$3,$4)
       ON CONFLICT(chat_id) DO UPDATE SET name=$2,phone=$3,company=$4
-    `, [chatId, data.name, data.phone, data.company]);
+    `, [n(chatId), data.name, data.phone, data.company]);
   },
   async createTender(data) {
     const seq = await pool.query("SELECT NEXTVAL('tender_seq') AS n");
@@ -122,8 +124,8 @@ const db = {
   async saveProposal(data) {
     const r = await pool.query(`
       INSERT INTO proposals(tender_id,supplier_chat_id,supplier_name,supplier_phone,price,delivery_days)
-      VALUES($1,$2,$3,$4,$5,$6) RETURNING id
-    `, [data.tenderId, data.chatId, data.name, data.phone, data.price, data.deadline]);
+      VALUES($1,$2::bigint,$3,$4,$5,$6) RETURNING id
+    `, [data.tenderId, n(data.chatId), data.name, data.phone, data.price, data.deadline]);
     return r.rows[0].id;
   },
   async getProposals(tenderId) {
@@ -143,8 +145,8 @@ const db = {
   },
   async getSupplierRating(chatId) {
     const r = await pool.query(
-      'SELECT AVG(rating) as avg, COUNT(*) as total FROM proposals WHERE supplier_chat_id=$1 AND rating IS NOT NULL',
-      [chatId]
+      'SELECT AVG(rating) as avg, COUNT(*) as total FROM proposals WHERE supplier_chat_id=$1::bigint AND rating IS NOT NULL',
+      [n(chatId)]
     );
     return r.rows[0];
   },
@@ -162,9 +164,9 @@ bot.start(async (ctx) => {
 
   if (payload?.startsWith('sup_')) {
     await pool.query(`
-      INSERT INTO suppliers(chat_id,supplier_id) VALUES($1,$2)
+      INSERT INTO suppliers(chat_id,supplier_id) VALUES($1::bigint,$2)
       ON CONFLICT(chat_id) DO UPDATE SET supplier_id=$2
-    `, [chatId, payload]);
+    `, [n(chatId), payload]);
     await ctx.reply('🔗 Аккаунт привязан к kizmat.kg!\n\nВведите ваше имя и компанию:');
     ctx.session.step = 'awaiting_name';
     ctx.session.role = 'supplier';
@@ -536,7 +538,7 @@ app.get('/dashboard/tender/:id', async (req, res) => {
 // Кабинет поставщика
 app.get('/dashboard/supplier/:chatId', async (req, res) => {
   const chatId = req.params.chatId;
-  const sup = await pool.query('SELECT * FROM suppliers WHERE chat_id=$1', [chatId]);
+  const sup = await pool.query('SELECT * FROM suppliers WHERE chat_id=$1::bigint', [n(chatId)]);
   if (!sup.rows[0]) return res.status(404).send('Поставщик не найден');
   const s = sup.rows[0];
   const cats = (s.categories || []).map(id => catById[id]?.name || id).join(', ');
@@ -547,8 +549,8 @@ app.get('/dashboard/supplier/:chatId', async (req, res) => {
   const propsR = await pool.query(`
     SELECT p.*, t.title as tender_title, t.budget, t.category_id
     FROM proposals p JOIN tenders t ON p.tender_id=t.id
-    WHERE p.supplier_chat_id=$1 ORDER BY p.submitted_at DESC
-  `, [chatId]);
+    WHERE p.supplier_chat_id=$1::bigint ORDER BY p.submitted_at DESC
+  `, [n(chatId)]);
 
   let pRows = '';
   for (const p of propsR.rows) {
