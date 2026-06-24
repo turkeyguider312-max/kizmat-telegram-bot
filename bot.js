@@ -227,9 +227,26 @@ bot.command('mystatus', async (ctx) => {
   ctx.reply('Вы не зарегистрированы. /start');
 });
 
+// ── /mycabinet ────────────────────────────────────────────────────────────────
+bot.command('mycabinet', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const sup = await db.getSupplier(chatId);
+  const cus = await db.getCustomer(chatId);
+  const base = process.env.APP_URL || 'https://worker-production-d53d.up.railway.app';
+  if (sup) {
+    return ctx.reply(
+      `📦 Ваш личный кабинет поставщика:\n\n${base}/dashboard/supplier/${chatId}\n\nТам видны все ваши предложения, статусы и отзывы.`
+    );
+  }
+  if (cus) {
+    return ctx.reply(`🏢 Кабинет заказчика:\n\n${base}/dashboard`);
+  }
+  ctx.reply('Вы не зарегистрированы. /start');
+});
+
 // ── /help ─────────────────────────────────────────────────────────────────────
 bot.command('help', (ctx) => ctx.reply(
-  '📌 Команды:\n\n/start — регистрация\n/newtender — создать тендер\n/testtender — тест\n/mystatus — профиль\n/help — помощь'
+  '📌 Команды:\n\n/start — регистрация\n/newtender — создать тендер (заказчик)\n/mycabinet — личный кабинет\n/testtender — тест\n/mystatus — профиль\n/help — помощь'
 ));
 
 // ── Текстовые сообщения ───────────────────────────────────────────────────────
@@ -511,6 +528,79 @@ app.get('/dashboard/tender/:id', async (req, res) => {
     <table>
       <thead><tr><th>Поставщик</th><th>Телефон</th><th>Цена</th><th>Срок</th><th>Оценка</th><th>Отзыв</th><th>Дата</th></tr></thead>
       <tbody>${pRows || '<tr><td colspan="7" style="text-align:center;color:#999">Предложений пока нет</td></tr>'}</tbody>
+    </table>
+  </div>
+</body></html>`);
+});
+
+// Кабинет поставщика
+app.get('/dashboard/supplier/:chatId', async (req, res) => {
+  const chatId = req.params.chatId;
+  const sup = await pool.query('SELECT * FROM suppliers WHERE chat_id=$1', [chatId]);
+  if (!sup.rows[0]) return res.status(404).send('Поставщик не найден');
+  const s = sup.rows[0];
+  const cats = (s.categories || []).map(id => catById[id]?.name || id).join(', ');
+
+  const ratingR = await db.getSupplierRating(chatId);
+  const avgRating = ratingR.avg ? `⭐ ${parseFloat(ratingR.avg).toFixed(1)} (${ratingR.total} отзывов)` : 'Нет отзывов';
+
+  const propsR = await pool.query(`
+    SELECT p.*, t.title as tender_title, t.budget, t.category_id
+    FROM proposals p JOIN tenders t ON p.tender_id=t.id
+    WHERE p.supplier_chat_id=$1 ORDER BY p.submitted_at DESC
+  `, [chatId]);
+
+  let pRows = '';
+  for (const p of propsR.rows) {
+    const stars = p.rating ? '⭐'.repeat(p.rating) : '—';
+    const status = p.rating ? `<span style="color:#16a34a">Завершён</span>` : `<span style="color:#2563eb">В работе</span>`;
+    pRows += `<tr>
+      <td><a href="/dashboard/tender/${p.tender_id}">${p.tender_id}</a></td>
+      <td>${p.tender_title}</td>
+      <td><b>${p.price}</b></td>
+      <td>${p.delivery_days}</td>
+      <td>${status}</td>
+      <td>${stars}</td>
+      <td>${p.rating_comment || '—'}</td>
+      <td>${new Date(p.submitted_at).toLocaleDateString('ru-RU')}</td>
+    </tr>`;
+  }
+
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><title>Кабинет поставщика</title>
+<style>
+  body{font-family:sans-serif;margin:0;background:#f5f5f5}
+  .header{background:#16a34a;color:#fff;padding:20px 40px}
+  .header h1{margin:0;font-size:24px}
+  .content{padding:30px 40px}
+  .card{background:#fff;border-radius:8px;padding:24px;margin-bottom:24px;box-shadow:0 1px 4px rgba(0,0,0,.1);display:flex;gap:40px}
+  .stat{text-align:center}
+  .stat .num{font-size:32px;font-weight:bold;color:#16a34a}
+  .stat .label{font-size:13px;color:#666;margin-top:4px}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+  th{background:#15803d;color:#fff;padding:12px 16px;text-align:left;font-size:13px}
+  td{padding:12px 16px;border-bottom:1px solid #f0f0f0;font-size:14px}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:#f0fdf4}
+  a{color:#16a34a;text-decoration:none}
+</style></head>
+<body>
+  <div class="header"><h1>📦 Кабинет поставщика</h1></div>
+  <div class="content">
+    <a href="/dashboard">← Все тендеры</a>
+    <div class="card" style="margin-top:16px;align-items:center">
+      <div style="flex:1">
+        <h2 style="margin:0">${s.name}</h2>
+        <p style="margin:8px 0;color:#555">📞 ${s.phone}</p>
+        <p style="margin:0;color:#555">📦 ${cats}</p>
+      </div>
+      <div class="stat"><div class="num">${propsR.rows.length}</div><div class="label">Предложений</div></div>
+      <div class="stat"><div class="num">${ratingR.avg ? parseFloat(ratingR.avg).toFixed(1) : '—'}</div><div class="label">${avgRating}</div></div>
+    </div>
+    <h2>Мои предложения (${propsR.rows.length})</h2>
+    <table>
+      <thead><tr><th>Тендер</th><th>Название</th><th>Цена</th><th>Срок</th><th>Статус</th><th>Оценка</th><th>Отзыв</th><th>Дата</th></tr></thead>
+      <tbody>${pRows || '<tr><td colspan="8" style="text-align:center;color:#999">Предложений пока нет</td></tr>'}</tbody>
     </table>
   </div>
 </body></html>`);
