@@ -1,7 +1,7 @@
 {
   "name": "kizmat-telegram-bot",
-  "version": "2.0.0",
-  "description": "Telegram B2B bot for Kyzmat.kg — supplier tender notification system",
+  "version": "3.0.0",
+  "description": "Kyzmat.kg B2B Telegram bot — supplier tender notification system",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "telegraf": "^4.16.3",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18"
