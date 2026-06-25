@@ -780,7 +780,6 @@ app.get('/dashboard/supplier/:chatId', async (req, res) => {
 <body>
   <div class="header"><h1>📦 Кабинет поставщика</h1></div>
   <div class="content">
-    <a href="/dashboard/supplier/${chatId}">← Мой кабинет</a>
     <div class="card" style="margin-top:16px;align-items:center">
       <div style="flex:1">
         <h2 style="margin:0">${s.name}</h2>
