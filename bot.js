@@ -748,7 +748,7 @@ app.get('/dashboard/supplier/:chatId', async (req, res) => {
     const stars = p.rating ? '⭐'.repeat(p.rating) : '—';
     const status = p.rating ? `<span style="color:#16a34a">Завершён</span>` : `<span style="color:#2563eb">В работе</span>`;
     pRows += `<tr>
-      <td><a href="/dashboard/tender/${p.tender_id}">${p.tender_id}</a></td>
+      <td><a href="/dashboard/supplier/${chatId}/tender/${p.tender_id}">${p.tender_id}</a></td>
       <td>${p.tender_title}</td>
       <td><b>${p.price}</b></td>
       <td>${p.delivery_days}</td>
@@ -797,6 +797,137 @@ app.get('/dashboard/supplier/:chatId', async (req, res) => {
     </table>
   </div>
 </body></html>`);
+});
+
+// Страница поставщика — его предложение по конкретному тендеру
+app.get('/dashboard/supplier/:chatId/tender/:tenderId', async (req, res) => {
+  const { chatId, tenderId } = req.params;
+
+  const [supR, tenderR, allPropsR] = await Promise.all([
+    pool.query('SELECT * FROM suppliers WHERE chat_id=$1::bigint', [n(chatId)]),
+    db.getTender(tenderId),
+    db.getProposals(tenderId),
+  ]);
+
+  const sup    = supR.rows[0];
+  const tender = tenderR;
+  if (!sup || !tender) return res.status(404).send('Не найдено');
+
+  // Предложение этого поставщика
+  const myProp = allPropsR.find(p => String(p.supplier_chat_id) === String(chatId));
+  const cat    = catById[tender.category_id]?.name || tender.category_id;
+
+  // Позиция поставщика — только цифра позиции и цвет, без чужих цен
+  const scored   = scoreProposals(allPropsR);
+  const myScored = scored.find(p => String(p.supplier_chat_id) === String(chatId));
+  const myRank   = myScored ? scored.indexOf(myScored) + 1 : null;
+  const total    = scored.length;
+
+  // Цвет позиции: зелёный (топ-треть) → коричневый (середина) → красный (аутсайдер)
+  let posColor = '#64748b', posLabel = '—', posText = '', barPct = 0;
+  if (myRank && total > 0) {
+    // Сравниваем нашу цену с лучшей
+    const myPrice  = parsePrice(myProp?.price || '0');
+    const minPrice = Math.min(...allPropsR.map(p => parsePrice(p.price)));
+    const maxPrice = Math.max(...allPropsR.map(p => parsePrice(p.price)));
+    const range    = maxPrice - minPrice;
+
+    // Позиция в диапазоне 0..1 (0=лучшая=зелёная, 1=худшая=красная)
+    barPct = range > 0 ? Math.round(((myPrice - minPrice) / range) * 100) : 0;
+
+    if (barPct <= 15) {
+      posColor = '#15803d'; posLabel = 'Конкурентная';
+      posText = 'Ваша цена в топе — высокие шансы выиграть тендер';
+    } else if (barPct <= 45) {
+      posColor = '#92400e'; posLabel = 'Выше среднего';
+      posText = 'Ваша цена близка к лучшей — есть шанс выиграть';
+    } else if (barPct <= 75) {
+      posColor = '#b45309'; posLabel = 'Средняя позиция';
+      posText = 'Ваша цена в середине — рассмотрите возможность снижения';
+    } else {
+      posColor = '#dc2626'; posLabel = 'Слабая позиция';
+      posText = 'Ваша цена значительно выше лучшего предложения';
+    }
+  }
+
+  // Детали своего предложения
+  let propCard = '';
+  if (myProp) {
+    const stars    = myProp.rating ? '⭐'.repeat(myProp.rating) + ` (${myProp.rating}/5)` : 'Ещё нет оценки';
+    const payLabel = myProp.payment_type === 'отсрочка'
+      ? `Отсрочка${myProp.payment_days ? ' ' + myProp.payment_days + ' дней' : ''}`
+      : myProp.payment_type === 'безнал' ? 'Безнал' : (myProp.payment_type || '—');
+    propCard = `
+    <div class="prop-card">
+      <div class="prop-row"><span class="prop-label">💰 Ваша цена</span><span class="prop-val">${myProp.price}</span></div>
+      <div class="prop-row"><span class="prop-label">⏱ Срок поставки</span><span class="prop-val">${myProp.delivery_days}</span></div>
+      <div class="prop-row"><span class="prop-label">💳 Оплата</span><span class="prop-val">${payLabel}</span></div>
+      <div class="prop-row"><span class="prop-label">📦 Наличие</span><span class="prop-val">${myProp.qty_available || '—'}</span></div>
+      <div class="prop-row"><span class="prop-label">⭐ Оценка</span><span class="prop-val">${stars}</span></div>
+      ${myProp.rating_comment ? `<div class="prop-row"><span class="prop-label">💬 Отзыв</span><span class="prop-val">${myProp.rating_comment}</span></div>` : ''}
+    </div>`;
+  } else {
+    propCard = `<div style="padding:24px;background:#fff3cd;border-radius:8px;color:#92400e">⚠️ Вы не подавали предложение на этот тендер.</div>`;
+  }
+
+  // Индикатор позиции
+  const posBar = myRank ? `
+  <div class="pos-block">
+    <h3 style="margin:0 0 16px">📊 Ваша конкурентная позиция</h3>
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
+      <span style="font-size:32px;font-weight:800;color:${posColor}">${myRank}</span>
+      <div>
+        <div style="font-size:20px;font-weight:700;color:${posColor}">${posLabel}</div>
+        <div style="font-size:13px;color:#64748b">${posText}</div>
+      </div>
+    </div>
+    <div style="margin-bottom:8px;font-size:13px;color:#64748b">Позиция среди ${total} предложений:</div>
+    <div style="position:relative;height:16px;background:#e2e8f0;border-radius:8px;overflow:visible">
+      <div style="position:absolute;left:0;top:0;height:100%;border-radius:8px;
+        background:linear-gradient(to right,#15803d,#ca8a04,#dc2626);width:100%;opacity:0.3"></div>
+      <div style="position:absolute;top:50%;left:calc(${barPct}% - 10px);transform:translateY(-50%);
+        width:20px;height:20px;background:${posColor};border-radius:50%;border:3px solid #fff;
+        box-shadow:0 2px 6px rgba(0,0,0,.25)"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-top:6px">
+      <span>🟢 Лучшая цена</span><span>🔴 Высокая цена</span>
+    </div>
+    ${total > 1 ? `<div style="margin-top:12px;padding:8px 14px;background:#f1f5f9;border-radius:8px;font-size:13px;color:#475569">
+      Всего предложений: <b>${total}</b>
+    </div>` : ''}
+  </div>` : `<div style="padding:16px;background:#f1f5f9;border-radius:8px;color:#64748b">Вы единственный участник тендера</div>`;
+
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Тендер ${tenderId} — кабинет поставщика</title>
+<style>${CSS}
+.prop-card{background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.prop-row{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid #f1f5f9}
+.prop-row:last-child{border-bottom:none}
+.prop-label{color:#64748b;font-size:14px}
+.prop-val{font-size:15px;font-weight:600;color:#1e293b}
+.pos-block{background:#fff;border-radius:8px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+</style></head>
+<body>
+<div class="hdr" style="background:#16a34a">
+  <span style="font-size:28px">📦</span>
+  <h1>Тендер ${tenderId} — ${tender.title}</h1>
+</div>
+<div class="wrap">
+  <a href="/dashboard/supplier/${chatId}" style="color:#94a3b8;font-size:14px">← Мой кабинет</a>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0">
+    <div class="card">
+      <h2 style="margin:0 0 12px">${tender.title}</h2>
+      <p style="margin:6px 0">🗂 <b>Категория:</b> ${cat}</p>
+      <p style="margin:6px 0">📊 <b>Объём:</b> ${tender.quantity}</p>
+      <p style="margin:6px 0">⏰ <b>Срок подачи:</b> ${tender.deadline}</p>
+      <p style="margin:6px 0">📍 <b>Локация:</b> ${tender.location}</p>
+    </div>
+    ${posBar}
+  </div>
+  <h2 style="margin:16px 0 12px">Моё предложение</h2>
+  ${propCard}
+</div></body></html>`);
 });
 
 // API: создать тендер с сайта
