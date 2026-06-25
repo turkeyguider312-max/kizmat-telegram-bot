@@ -439,100 +439,207 @@ function checkSecret(req, res) {
   return true;
 }
 
-// Dashboard HTML
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function parsePrice(str) {
+  return parseInt((str || '0').replace(/\D/g, '')) || 0;
+}
+function parseDays(str) {
+  const m = (str || '').match(/(\d+)/);
+  return m ? parseInt(m[1]) : 99;
+}
+function tenderStatus(t, propCount) {
+  if (t.status === 'closed') return { label: '✅ Выбран победитель', cls: 'won' };
+  const d = new Date(t.created_at);
+  const now = new Date();
+  const diffDays = Math.ceil((now - d) / 86400000);
+  if (diffDays > 30) return { label: '🔴 Истёк', cls: 'expired' };
+  if (diffDays > 20) return { label: '🟡 Закрывается', cls: 'closing' };
+  return { label: '🟢 Открыт', cls: 'open' };
+}
+function scoreProposals(proposals) {
+  if (!proposals.length) return [];
+  const prices  = proposals.map(p => parsePrice(p.price));
+  const days    = proposals.map(p => parseDays(p.delivery_days));
+  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  const minD = Math.min(...days),   maxD = Math.max(...days);
+  return proposals.map((p, i) => {
+    const pScore = maxP === minP ? 60 : ((maxP - prices[i]) / (maxP - minP)) * 60;
+    const dScore = maxD === minD ? 30 : ((maxD - days[i])   / (maxD - minD)) * 30;
+    const rScore = p.rating ? (p.rating / 5) * 10 : 5;
+    return { ...p, score: Math.round(pScore + dScore + rScore) };
+  }).sort((a, b) => b.score - a.score);
+}
+const CSS = `
+  *{box-sizing:border-box}
+  body{font-family:system-ui,sans-serif;margin:0;background:#f1f5f9;color:#1e293b}
+  .hdr{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;padding:18px 36px;display:flex;align-items:center;gap:12px}
+  .hdr h1{margin:0;font-size:22px;font-weight:700}
+  .wrap{padding:28px 36px}
+  .filters{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+  .filters select,.filters input{padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#fff}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+  th{background:#1e40af;color:#fff;padding:12px 14px;text-align:left;font-size:13px;font-weight:600}
+  td{padding:12px 14px;border-bottom:1px solid #f1f5f9;font-size:14px;vertical-align:middle}
+  tr:last-child td{border:none}
+  tr:hover td{background:#f8faff}
+  a{color:#2563eb;text-decoration:none;font-weight:500}
+  a:hover{text-decoration:underline}
+  .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
+  .open{background:#dcfce7;color:#15803d}
+  .closing{background:#fef9c3;color:#854d0e}
+  .expired{background:#fee2e2;color:#b91c1c}
+  .won{background:#ede9fe;color:#6d28d9}
+  .card{background:#fff;border-radius:10px;padding:22px;margin-bottom:20px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}
+  .stat-card{background:#fff;border-radius:10px;padding:18px;box-shadow:0 1px 6px rgba(0,0,0,.08);text-align:center}
+  .stat-card .val{font-size:24px;font-weight:700;color:#2563eb}
+  .stat-card .lbl{font-size:12px;color:#64748b;margin-top:4px}
+  .corridor{background:#fff;border-radius:10px;padding:20px;margin-bottom:20px;box-shadow:0 1px 6px rgba(0,0,0,.08)}
+  .corridor h3{margin:0 0 14px;font-size:16px}
+  .bar-wrap{position:relative;height:8px;background:#e2e8f0;border-radius:4px;margin:16px 0}
+  .bar-fill{height:100%;background:linear-gradient(90deg,#22c55e,#f59e0b,#ef4444);border-radius:4px}
+  .medals{font-size:22px}
+  .score-badge{display:inline-block;background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:12px;font-size:12px;font-weight:700}
+`;
+
+// Dashboard — главная
 app.get('/dashboard', async (req, res) => {
-  const tenders = await db.getAllTenders();
-  let rows = '';
-  for (const t of tenders) {
-    const props = await db.getProposals(t.id);
-    const cat   = catById[t.category_id]?.name || t.category_id;
-    rows += `<tr>
-      <td><b>${t.id}</b></td>
+  const catFilter = req.query.cat || '';
+  const sortBy    = req.query.sort || 'new';
+  let tenders = await db.getAllTenders();
+  if (catFilter) tenders = tenders.filter(t => t.category_id === catFilter);
+  const rows = await Promise.all(tenders.map(async t => {
+    const props  = await db.getProposals(t.id);
+    const cat    = catById[t.category_id]?.name || t.category_id;
+    const st     = tenderStatus(t, props.length);
+    const scored = scoreProposals(props);
+    const best   = scored[0] ? `🥇 ${scored[0].price}` : '—';
+    return { t, props, cat, st, best };
+  }));
+  if (sortBy === 'active') rows.sort((a,b) => b.props.length - a.props.length);
+
+  const catOptions = CATEGORIES.map(c =>
+    `<option value="${c.id}" ${catFilter===c.id?'selected':''}>${c.name}</option>`
+  ).join('');
+
+  const tableRows = rows.map(({ t, props, cat, st, best }) => `
+    <tr>
+      <td><a href="/dashboard/tender/${t.id}"><b>${t.id}</b></a></td>
       <td>${t.title}</td>
-      <td>${cat}</td>
+      <td><span style="font-size:12px;color:#64748b">${cat}</span></td>
       <td>${t.budget}</td>
-      <td>${t.deadline}</td>
-      <td>${props.length}</td>
-      <td><a href="/dashboard/tender/${t.id}">Подробнее →</a></td>
-    </tr>`;
-  }
+      <td style="font-size:13px;color:#64748b">${t.deadline}</td>
+      <td><b>${props.length}</b>${props.length?` <span style="color:#15803d;font-size:12px">${best}</span>`:''}</td>
+      <td><span class="badge ${st.cls}">${st.label}</span></td>
+      <td><a href="/dashboard/tender/${t.id}">Открыть →</a></td>
+    </tr>`).join('') || `<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:32px">Тендеров пока нет</td></tr>`;
+
   res.send(`<!DOCTYPE html>
 <html lang="ru"><head><meta charset="UTF-8"><title>Кызмат.kg — Дашборд</title>
-<style>
-  body{font-family:sans-serif;margin:0;background:#f5f5f5}
-  .header{background:#2563eb;color:#fff;padding:20px 40px}
-  .header h1{margin:0;font-size:24px}
-  .content{padding:30px 40px}
-  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-  th{background:#1e40af;color:#fff;padding:12px 16px;text-align:left;font-size:13px}
-  td{padding:12px 16px;border-bottom:1px solid #f0f0f0;font-size:14px}
-  tr:last-child td{border-bottom:none}
-  tr:hover td{background:#f8faff}
-  a{color:#2563eb;text-decoration:none}
-  .badge{background:#dcfce7;color:#166534;padding:2px 8px;border-radius:12px;font-size:12px}
-</style></head>
+<style>${CSS}</style></head>
 <body>
-  <div class="header"><h1>🏗 Кызмат.kg B2B — Кабинет заказчика</h1></div>
-  <div class="content">
-    <h2>Все тендеры (${tenders.length})</h2>
-    <table>
-      <thead><tr><th>ID</th><th>Название</th><th>Категория</th><th>Бюджет</th><th>Срок</th><th>Предложений</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" style="text-align:center;color:#999">Тендеров пока нет</td></tr>'}</tbody>
-    </table>
+<div class="hdr"><span style="font-size:28px">🏗</span><h1>Кызмат.kg B2B — Кабинет заказчика</h1></div>
+<div class="wrap">
+  <div class="filters">
+    <form method="get" style="display:flex;gap:10px;flex-wrap:wrap">
+      <select name="cat" onchange="this.form.submit()">
+        <option value="">Все категории</option>${catOptions}
+      </select>
+      <select name="sort" onchange="this.form.submit()">
+        <option value="new" ${sortBy==='new'?'selected':''}>Новые сначала</option>
+        <option value="active" ${sortBy==='active'?'selected':''}>По активности</option>
+      </select>
+    </form>
   </div>
-</body></html>`);
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Категория</th><th>Бюджет</th><th>Срок</th><th>Предложений</th><th>Статус</th><th></th></tr></thead>
+    <tbody>${tableRows}</tbody>
+  </table>
+</div></body></html>`);
 });
 
-// Детали тендера
+// Детали тендера — с ранжированием и коридором цен
 app.get('/dashboard/tender/:id', async (req, res) => {
   const tender = await db.getTender(req.params.id);
   if (!tender) return res.status(404).send('Тендер не найден');
-  const proposals = await db.getProposals(req.params.id);
-  const cat = catById[tender.category_id]?.name || tender.category_id;
-  let pRows = '';
-  for (const p of proposals) {
+  const rawProposals = await db.getProposals(req.params.id);
+  const cat      = catById[tender.category_id]?.name || tender.category_id;
+  const scored   = scoreProposals(rawProposals);
+  const medals   = ['🥇','🥈','🥉'];
+
+  // Коридор цен
+  let corridorHtml = '';
+  if (scored.length) {
+    const prices  = scored.map(p => parsePrice(p.price));
+    const minP    = Math.min(...prices), maxP = Math.max(...prices);
+    const avgP    = Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
+    const budgetP = parsePrice(tender.budget);
+    const saving  = budgetP ? Math.round((budgetP-minP)/budgetP*100) : 0;
+    const pct     = maxP>minP ? Math.round((avgP-minP)/(maxP-minP)*100) : 50;
+    corridorHtml = `
+    <div class="corridor">
+      <h3>📊 Аналитика по тендеру</h3>
+      <div style="display:flex;gap:24px;flex-wrap:wrap">
+        <div><span style="color:#15803d;font-weight:700;font-size:18px">${minP.toLocaleString('ru')} сом</span><br><span style="font-size:12px;color:#64748b">💰 Минимум</span></div>
+        <div><span style="color:#d97706;font-weight:700;font-size:18px">${avgP.toLocaleString('ru')} сом</span><br><span style="font-size:12px;color:#64748b">📊 Средняя</span></div>
+        <div><span style="color:#dc2626;font-weight:700;font-size:18px">${maxP.toLocaleString('ru')} сом</span><br><span style="font-size:12px;color:#64748b">💸 Максимум</span></div>
+        ${budgetP ? `<div><span style="color:#7c3aed;font-weight:700;font-size:18px">${budgetP.toLocaleString('ru')} сом</span><br><span style="font-size:12px;color:#64748b">🎯 Бюджет</span></div>` : ''}
+      </div>
+      <div class="bar-wrap"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#94a3b8">
+        <span>${minP.toLocaleString('ru')}</span><span>${maxP.toLocaleString('ru')}</span>
+      </div>
+      ${saving>0 ? `<div style="margin-top:12px;padding:8px 14px;background:#dcfce7;border-radius:8px;color:#15803d;font-size:14px;font-weight:600">✅ Лучшее предложение экономит ${saving}% от бюджета</div>` : ''}
+    </div>`;
+  }
+
+  // Таблица с рейтингом
+  const pRows = scored.length ? scored.map((p, i) => {
+    const medal = medals[i] || `${i+1}.`;
     const stars = p.rating ? '⭐'.repeat(p.rating) : '—';
-    pRows += `<tr>
-      <td>${p.supplier_name}</td>
-      <td>${p.supplier_phone}</td>
-      <td><b>${p.price}</b></td>
+    const isTop = i === 0;
+    return `<tr style="${isTop?'background:#f0fdf4':''}">
+      <td><span class="medals">${medal}</span></td>
+      <td><b>${p.supplier_name}</b><br><span style="font-size:12px;color:#64748b">${p.supplier_phone}</span></td>
+      <td><b style="color:${isTop?'#15803d':'inherit'};font-size:16px">${p.price}</b></td>
       <td>${p.delivery_days}</td>
+      <td><span class="score-badge">${p.score} баллов</span></td>
       <td>${stars}</td>
-      <td>${p.rating_comment || '—'}</td>
+      <td>${p.rating_comment||'—'}</td>
       <td>${new Date(p.submitted_at).toLocaleDateString('ru-RU')}</td>
     </tr>`;
-  }
+  }).join('') : `<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:32px">Предложений пока нет</td></tr>`;
+
   res.send(`<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><title>${tender.id}</title>
-<style>
-  body{font-family:sans-serif;margin:0;background:#f5f5f5}
-  .header{background:#2563eb;color:#fff;padding:20px 40px}
-  .content{padding:30px 40px}
-  .card{background:#fff;border-radius:8px;padding:24px;margin-bottom:24px;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-  th{background:#1e40af;color:#fff;padding:12px 16px;text-align:left;font-size:13px}
-  td{padding:12px 16px;border-bottom:1px solid #f0f0f0;font-size:14px}
-  a{color:#2563eb}
-</style></head>
+<html lang="ru"><head><meta charset="UTF-8"><title>Тендер ${tender.id}</title>
+<style>${CSS}</style></head>
 <body>
-  <div class="header"><h1>🏗 Тендер ${tender.id}</h1></div>
-  <div class="content">
-    <a href="/dashboard">← Все тендеры</a>
-    <div class="card" style="margin-top:16px">
-      <h2>${tender.title}</h2>
-      <p>🗂 <b>Категория:</b> ${cat}</p>
-      <p>📊 <b>Объём:</b> ${tender.quantity}</p>
-      <p>💰 <b>Бюджет:</b> ${tender.budget}</p>
-      <p>⏰ <b>Срок:</b> ${tender.deadline}</p>
-      <p>📍 <b>Локация:</b> ${tender.location}</p>
+<div class="hdr"><span style="font-size:28px">🏗</span><h1>Тендер ${tender.id} — ${tender.title}</h1></div>
+<div class="wrap">
+  <a href="/dashboard" style="color:#94a3b8;font-size:14px">← Все тендеры</a>
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;margin:16px 0">
+    <div class="card">
+      <h2 style="margin:0 0 12px">${tender.title}</h2>
+      <p style="margin:6px 0">🗂 <b>Категория:</b> ${cat}</p>
+      <p style="margin:6px 0">📊 <b>Объём:</b> ${tender.quantity}</p>
+      <p style="margin:6px 0">💰 <b>Бюджет:</b> ${tender.budget}</p>
+      <p style="margin:6px 0">⏰ <b>Срок подачи:</b> ${tender.deadline}</p>
+      <p style="margin:6px 0">📍 <b>Локация:</b> ${tender.location}</p>
     </div>
-    <h2>Предложения (${proposals.length})</h2>
-    <table>
-      <thead><tr><th>Поставщик</th><th>Телефон</th><th>Цена</th><th>Срок</th><th>Оценка</th><th>Отзыв</th><th>Дата</th></tr></thead>
-      <tbody>${pRows || '<tr><td colspan="7" style="text-align:center;color:#999">Предложений пока нет</td></tr>'}</tbody>
-    </table>
+    <div class="card" style="text-align:center;display:flex;flex-direction:column;justify-content:center">
+      <div style="font-size:48px;font-weight:800;color:#2563eb">${scored.length}</div>
+      <div style="color:#64748b;font-size:14px">предложений</div>
+      ${scored[0]?`<div style="margin-top:12px;padding:8px;background:#dcfce7;border-radius:8px;color:#15803d;font-weight:600">🥇 Лучшая: ${scored[0].price}</div>`:''}
+    </div>
   </div>
-</body></html>`);
+  ${corridorHtml}
+  <h2 style="margin:0 0 12px">Предложения (${scored.length}) — ранжированы по баллам</h2>
+  <p style="color:#64748b;font-size:13px;margin:0 0 16px">Формула: 60% цена + 30% срок + 10% рейтинг поставщика</p>
+  <table>
+    <thead><tr><th>#</th><th>Поставщик</th><th>Цена</th><th>Срок</th><th>Балл</th><th>Оценка</th><th>Отзыв</th><th>Дата</th></tr></thead>
+    <tbody>${pRows}</tbody>
+  </table>
+</div></body></html>`);
 });
 
 // Кабинет поставщика
