@@ -1322,6 +1322,171 @@ app.get('/api/proposals/:tenderId', async (req, res) => {
 
 app.get('/', (req, res) => res.json({ ok: true, service: 'Kizmat.kg B2B Bot', version: '4.0' }));
 
+// ── Веб-регистрация поставщика ─────────────────────────────────────────────
+app.get('/register', (req, res) => {
+  const catBoxes = CATEGORIES.map(c => `
+    <label class="cat-label" for="cat_${c.id}">
+      <input type="checkbox" id="cat_${c.id}" name="categories" value="${c.id}">
+      <span class="cat-box">
+        <span class="cat-name">${c.name}</span>
+        <span class="cat-hint">${c.hint}</span>
+      </span>
+    </label>`).join('');
+
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Регистрация поставщика — Kizmat.kg</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#f0f4f8;color:#1e293b;min-height:100vh}
+  .topbar{background:#1565c0;padding:16px 24px;color:#fff;font-size:20px;font-weight:800}
+  .wrap{max-width:600px;margin:32px auto;padding:0 16px}
+  .card{background:#fff;border-radius:12px;padding:28px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:20px}
+  h2{font-size:20px;color:#1e293b;margin-bottom:20px}
+  label.field{display:block;margin-bottom:16px}
+  label.field span{display:block;font-size:13px;font-weight:600;color:#475569;margin-bottom:6px}
+  input[type=text],input[type=tel],input[type=email]{width:100%;border:1.5px solid #cbd5e1;border-radius:8px;padding:10px 14px;font-size:15px;outline:none;transition:border .15s}
+  input[type=text]:focus,input[type=tel]:focus,input[type=email]:focus{border-color:#1565c0}
+  .cat-section{margin-bottom:20px}
+  .cat-section h3{font-size:13px;font-weight:600;color:#475569;margin-bottom:10px}
+  .cat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .cat-label{cursor:pointer}
+  .cat-label input{display:none}
+  .cat-box{display:flex;flex-direction:column;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 14px;transition:all .15s;user-select:none}
+  .cat-label input:checked + .cat-box{border-color:#1565c0;background:#eff6ff}
+  .cat-box:hover{border-color:#93c5fd;background:#f8faff}
+  .cat-name{font-size:14px;font-weight:600;color:#1e293b}
+  .cat-hint{font-size:11px;color:#94a3b8;margin-top:2px}
+  .cat-label input:checked + .cat-box .cat-name{color:#1565c0}
+  .notice{font-size:12px;color:#64748b;margin-top:6px}
+  .btn-submit{width:100%;background:#1565c0;color:#fff;border:none;border-radius:8px;padding:14px;font-size:16px;font-weight:700;cursor:pointer;transition:background .15s}
+  .btn-submit:hover{background:#1251a3}
+  .btn-submit:disabled{background:#94a3b8;cursor:not-allowed}
+  .success{display:none;text-align:center;padding:32px 0}
+  .success .icon{font-size:56px;margin-bottom:16px}
+  .success h2{color:#15803d;margin-bottom:8px}
+  .success p{color:#64748b;font-size:14px}
+  .err{color:#dc2626;font-size:13px;margin-top:6px;display:none}
+</style></head>
+<body>
+<div class="topbar">🏗 Kizmat.kg — Регистрация поставщика</div>
+<div class="wrap">
+  <form id="form">
+    <div class="card">
+      <h2>Личные данные</h2>
+      <label class="field"><span>ФИО *</span>
+        <input type="text" name="name" placeholder="Алибек Матисов" required>
+      </label>
+      <label class="field"><span>Название компании *</span>
+        <input type="text" name="company" placeholder="ОсОО СтройСнаб" required>
+      </label>
+      <label class="field"><span>Телефон *</span>
+        <input type="tel" name="phone" placeholder="+996 700 123456" required>
+      </label>
+      <label class="field"><span>Email</span>
+        <input type="email" name="email" placeholder="info@example.com">
+      </label>
+    </div>
+
+    <div class="card">
+      <h2>Категории товаров</h2>
+      <div class="cat-section">
+        <h3>Выберите одну или несколько категорий, в которых работаете:</h3>
+        <div class="cat-grid">${catBoxes}</div>
+        <div class="notice">* Вы будете получать уведомления только по выбранным категориям</div>
+        <div class="err" id="catErr">Выберите хотя бы одну категорию</div>
+      </div>
+    </div>
+
+    <button type="submit" class="btn-submit" id="submitBtn">
+      Зарегистрироваться и подключить Telegram
+    </button>
+  </form>
+
+  <div class="success" id="success">
+    <div class="icon">✅</div>
+    <h2>Регистрация завершена!</h2>
+    <p id="successText">Откройте Telegram и нажмите кнопку ниже:</p>
+    <a id="tgLink" href="" style="display:inline-block;margin-top:16px;background:#1565c0;color:#fff;padding:12px 28px;border-radius:8px;font-weight:700;text-decoration:none;font-size:15px">
+      📱 Открыть бота в Telegram
+    </a>
+  </div>
+</div>
+
+<script>
+document.getElementById('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd  = new FormData(e.target);
+  const cats = fd.getAll('categories');
+  if (!cats.length) {
+    document.getElementById('catErr').style.display = 'block';
+    return;
+  }
+  document.getElementById('catErr').style.display = 'none';
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true; btn.textContent = 'Сохранение...';
+
+  const body = {
+    name:       fd.get('name').trim() + ' — ' + fd.get('company').trim(),
+    phone:      fd.get('phone').trim(),
+    categories: cats,
+    supplierId: 'web_' + Date.now(),
+  };
+
+  try {
+    const r = await fetch('/api/register-supplier', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': 'kizmat-secret-2026' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      document.getElementById('form').style.display = 'none';
+      document.getElementById('success').style.display = 'block';
+      document.getElementById('tgLink').href = data.botLink;
+      document.getElementById('successText').textContent =
+        'Нажмите кнопку ниже чтобы открыть бот и завершить подключение:';
+    } else {
+      btn.disabled = false; btn.textContent = 'Зарегистрироваться';
+      alert('Ошибка: ' + (data.error || 'попробуйте снова'));
+    }
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Зарегистрироваться';
+    alert('Ошибка соединения');
+  }
+});
+
+// Снимаем ошибку при выборе категории
+document.querySelectorAll('input[name=categories]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    document.getElementById('catErr').style.display = 'none';
+  });
+});
+</script>
+</body></html>`);
+});
+
+// API: веб-регистрация поставщика
+app.post('/api/register-supplier', async (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const { name, phone, categories, supplierId } = req.body;
+  if (!name || !phone || !categories?.length) {
+    return res.status(400).json({ error: 'name, phone и categories обязательны' });
+  }
+  const sid = supplierId || ('web_' + Date.now());
+  // Сохраняем без chat_id — он добавится когда откроет бота
+  // Для этого используем временный ID как supplier_id
+  const botUsername = process.env.BOT_USERNAME || 'kizmattbot';
+  const botLink = `https://t.me/${botUsername}?start=sup_${sid}`;
+  // Сохраняем данные в pending-таблице (используем supplier_id как ключ)
+  await pool.query(`
+    INSERT INTO suppliers(chat_id, name, phone, categories, supplier_id)
+    VALUES(0, $1, $2, $3, $4)
+    ON CONFLICT DO NOTHING
+  `, [name, phone, categories, sid]).catch(() => {});
+  res.json({ ok: true, botLink, supplierId: sid });
+});
+
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => console.log(`🌐 API + Dashboard: порт ${PORT}`));
