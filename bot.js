@@ -58,6 +58,12 @@ async function initDB() {
     );
     CREATE SEQUENCE IF NOT EXISTS tender_seq START 1;
   `);
+  // Добавляем новые поля если их ещё нет (безопасно для существующей БД)
+  await pool.query(`
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_type TEXT;
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_days INTEGER;
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS qty_available TEXT;
+  `);
   console.log('✅ База данных готова');
 }
 
@@ -123,9 +129,10 @@ const db = {
   },
   async saveProposal(data) {
     const r = await pool.query(`
-      INSERT INTO proposals(tender_id,supplier_chat_id,supplier_name,supplier_phone,price,delivery_days)
-      VALUES($1,$2::bigint,$3,$4,$5,$6) RETURNING id
-    `, [data.tenderId, n(data.chatId), data.name, data.phone, data.price, data.deadline]);
+      INSERT INTO proposals(tender_id,supplier_chat_id,supplier_name,supplier_phone,price,delivery_days,payment_type,payment_days,qty_available)
+      VALUES($1,$2::bigint,$3,$4,$5,$6,$7,$8,$9) RETURNING id
+    `, [data.tenderId, n(data.chatId), data.name, data.phone, data.price, data.deadline,
+        data.paymentType||null, data.paymentDays||null, data.qtyAvailable||null]);
     return r.rows[0].id;
   },
   async getProposals(tenderId) {
@@ -332,24 +339,71 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Предложение поставщика
-  if (step?.startsWith('proposal:')) {
-    const tenderId   = step.split(':')[1];
-    const priceMatch = text.match(/Цена[:\s]+([^\n]+)/i);
-    const dlMatch    = text.match(/Срок[:\s]+([^\n]+)/i);
-    if (!priceMatch || !dlMatch) return ctx.reply('⚠️ Формат:\n\nЦена: 185000 сом\nСрок: 3 дня');
+  // Предложение — шаг 1: цена
+  if (step === 'proposal_price') {
+    if (!text) return ctx.reply('Введите цену (например: 185 000 сом)');
+    ctx.session.proposalDraft.price = text.trim();
+    ctx.session.step = 'proposal_deadline';
+    return ctx.reply('⏱ Шаг 2/4: Срок поставки?\n(Пример: 5 дней, 2 недели)');
+  }
 
+  // Предложение — шаг 2: срок поставки
+  if (step === 'proposal_deadline') {
+    ctx.session.proposalDraft.deadline = text.trim();
+    ctx.session.step = 'proposal_payment';
+    return ctx.reply('💳 Шаг 3/4: Тип оплаты?',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('💵 Наличные', 'pay_type:наличные')],
+        [Markup.button.callback('🏦 Безналичный расчёт', 'pay_type:безнал')],
+        [Markup.button.callback('⏳ Отсрочка платежа', 'pay_type:отсрочка')],
+      ])
+    );
+  }
+
+  // Предложение — шаг 3б: срок отсрочки (только если выбрана отсрочка)
+  if (step === 'proposal_paydays') {
+    const days = text.match(/\d+/);
+    ctx.session.proposalDraft.paymentDays = days ? parseInt(days[0]) : null;
+    ctx.session.step = 'proposal_qty';
+    return ctx.reply('📦 Шаг 4/4: Сколько товара есть в наличии?\n(Пример: весь объём / 50 тонн / частично — под заказ остаток)');
+  }
+
+  // Предложение — шаг 4: наличие товара
+  if (step === 'proposal_qty') {
+    const draft = ctx.session.proposalDraft;
+    draft.qtyAvailable = text.trim();
+    ctx.session.step = null;
     const sup = await db.getSupplier(chatId);
     const pid = await db.saveProposal({
-      tenderId, chatId,
-      name:     sup?.name  || 'Неизвестный',
-      phone:    sup?.phone || '—',
-      price:    priceMatch[1].trim(),
-      deadline: dlMatch[1].trim(),
+      tenderId:     draft.tenderId,
+      chatId,
+      name:         sup?.name  || 'Неизвестный',
+      phone:        sup?.phone || '—',
+      price:        draft.price,
+      deadline:     draft.deadline,
+      paymentType:  draft.paymentType,
+      paymentDays:  draft.paymentDays,
+      qtyAvailable: draft.qtyAvailable,
     });
-    ctx.session.step = null;
-    await ctx.reply(`✅ Предложение принято!\n\n📦 Тендер: ${tenderId}\n💰 Цена: ${priceMatch[1].trim()}\n⏱ Срок: ${dlMatch[1].trim()}\n\nПередаём заказчику.`);
-    await notifyCustomer(tenderId, { name: sup?.name, phone: sup?.phone, price: priceMatch[1].trim(), deadline: dlMatch[1].trim(), id: pid });
+    ctx.session.proposalDraft = null;
+    const payLabel = draft.paymentType === 'отсрочка'
+      ? `Отсрочка ${draft.paymentDays ? draft.paymentDays + ' дней' : ''}`
+      : draft.paymentType === 'безнал' ? 'Безнал' : 'Наличные';
+    await ctx.reply(
+      `✅ Предложение принято!\n\n` +
+      `📦 Тендер: ${draft.tenderId}\n` +
+      `💰 Цена: ${draft.price}\n` +
+      `⏱ Срок поставки: ${draft.deadline}\n` +
+      `💳 Оплата: ${payLabel}\n` +
+      `📦 Наличие: ${draft.qtyAvailable}\n\n` +
+      `Передаём заказчику.`
+    );
+    await notifyCustomer(draft.tenderId, {
+      name: sup?.name, phone: sup?.phone,
+      price: draft.price, deadline: draft.deadline,
+      paymentType: draft.paymentType, paymentDays: draft.paymentDays,
+      qtyAvailable: draft.qtyAvailable, id: pid,
+    });
     return;
   }
 
@@ -366,8 +420,25 @@ bot.on('text', async (ctx) => {
 bot.action(/^propose:(.+)$/, (ctx) => {
   const tenderId = ctx.match[1];
   ctx.answerCbQuery();
-  ctx.session.step = `proposal:${tenderId}`;
-  ctx.reply(`📝 Подача предложения на тендер ${tenderId}\n\nОтправьте:\n\nЦена: 185000 сом\nСрок: 3 дня`);
+  ctx.session.proposalDraft = { tenderId };
+  ctx.session.step = 'proposal_price';
+  ctx.reply(`📝 Подача предложения на тендер ${tenderId}\n\n💰 Шаг 1/4: Укажите вашу цену\n(Пример: 185 000 сом)`);
+});
+
+// Тип оплаты
+bot.action(/^pay_type:(.+)$/, async (ctx) => {
+  const type = ctx.match[1];
+  ctx.answerCbQuery();
+  if (!ctx.session.proposalDraft) return ctx.reply('⚠️ Начните заново через /start');
+  ctx.session.proposalDraft.paymentType = type;
+  if (type === 'отсрочка') {
+    ctx.session.step = 'proposal_paydays';
+    ctx.editMessageText(`⏳ На сколько дней отсрочка?\n(Пример: 30 дней, 45 дней)`);
+  } else {
+    ctx.session.step = 'proposal_qty';
+    const label = type === 'безнал' ? '🏦 Безнал' : '💵 Наличные';
+    ctx.editMessageText(`${label} выбран.\n\n📦 Шаг 4/4: Сколько товара есть в наличии?\n(Пример: весь объём / 50 тонн / частично — под заказ остаток)`);
+  }
 });
 
 bot.action(/^skip:(.+)$/, (ctx) => {
@@ -418,10 +489,18 @@ async function notifySuppliers(tenderId) {
 async function notifyCustomer(tenderId, proposal) {
   const tender = await db.getTender(tenderId);
   if (!tender?.customer_id) return;
+  const payLabel = proposal.paymentType === 'отсрочка'
+    ? `Отсрочка ${proposal.paymentDays ? proposal.paymentDays + ' дней' : ''}`
+    : proposal.paymentType === 'безнал' ? 'Безнал' : (proposal.paymentType || '—');
   await bot.telegram.sendMessage(
     tender.customer_id,
     `📬 Новое предложение на тендер #${tenderId}!\n\n` +
-    `👤 ${proposal.name}\n📞 ${proposal.phone}\n💰 ${proposal.price}\n⏱ ${proposal.deadline}\n\n` +
+    `👤 ${proposal.name}\n` +
+    `📞 ${proposal.phone}\n` +
+    `💰 Цена: ${proposal.price}\n` +
+    `⏱ Срок поставки: ${proposal.deadline}\n` +
+    `💳 Оплата: ${payLabel}\n` +
+    `📦 Наличие: ${proposal.qtyAvailable || '—'}\n\n` +
     `Оцените поставщика после выполнения:`,
     Markup.inlineKeyboard([
       [1,2,3,4,5].map(n => Markup.button.callback('⭐'.repeat(n>3?1:n)+n, `rate:${proposal.id}:${n}`))
@@ -598,17 +677,22 @@ app.get('/dashboard/tender/:id', async (req, res) => {
     const medal = medals[i] || `${i+1}.`;
     const stars = p.rating ? '⭐'.repeat(p.rating) : '—';
     const isTop = i === 0;
+    let payBadge = '—';
+    if (p.payment_type === 'безнал')    payBadge = '<span style="background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:12px;font-size:12px">🏦 Безнал</span>';
+    if (p.payment_type === 'наличные')  payBadge = '<span style="background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:12px;font-size:12px">💵 Нал</span>';
+    if (p.payment_type === 'отсрочка')  payBadge = `<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:12px;font-size:12px">⏳ Отсрочка${p.payment_days?` ${p.payment_days}д`:''}</span>`;
     return `<tr style="${isTop?'background:#f0fdf4':''}">
       <td><span class="medals">${medal}</span></td>
       <td><b>${p.supplier_name}</b><br><span style="font-size:12px;color:#64748b">${p.supplier_phone}</span></td>
       <td><b style="color:${isTop?'#15803d':'inherit'};font-size:16px">${p.price}</b></td>
       <td>${p.delivery_days}</td>
+      <td>${payBadge}</td>
+      <td>${p.qty_available||'—'}</td>
       <td><span class="score-badge">${p.score} баллов</span></td>
       <td>${stars}</td>
-      <td>${p.rating_comment||'—'}</td>
       <td>${new Date(p.submitted_at).toLocaleDateString('ru-RU')}</td>
     </tr>`;
-  }).join('') : `<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:32px">Предложений пока нет</td></tr>`;
+  }).join('') : `<tr><td colspan="9" style="text-align:center;color:#94a3b8;padding:32px">Предложений пока нет</td></tr>`;
 
   res.send(`<!DOCTYPE html>
 <html lang="ru"><head><meta charset="UTF-8"><title>Тендер ${tender.id}</title>
@@ -636,7 +720,7 @@ app.get('/dashboard/tender/:id', async (req, res) => {
   <h2 style="margin:0 0 12px">Предложения (${scored.length}) — ранжированы по баллам</h2>
   <p style="color:#64748b;font-size:13px;margin:0 0 16px">Формула: 60% цена + 30% срок + 10% рейтинг поставщика</p>
   <table>
-    <thead><tr><th>#</th><th>Поставщик</th><th>Цена</th><th>Срок</th><th>Балл</th><th>Оценка</th><th>Отзыв</th><th>Дата</th></tr></thead>
+    <thead><tr><th>#</th><th>Поставщик</th><th>Цена</th><th>Срок поставки</th><th>Оплата</th><th>Наличие</th><th>Балл</th><th>Оценка</th><th>Дата</th></tr></thead>
     <tbody>${pRows}</tbody>
   </table>
 </div></body></html>`);
