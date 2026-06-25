@@ -193,14 +193,14 @@ bot.action('role_supplier', (ctx) => {
   ctx.answerCbQuery();
   ctx.session.role = 'supplier';
   ctx.session.step = 'awaiting_name';
-  ctx.editMessageText('📦 Регистрация поставщика\n\nВведите имя и компанию:\n(Пример: Алибек — ОсОО СтройСнаб)');
+  ctx.editMessageText('📦 Регистрация поставщика\n\nШаг 1/3: Введите ваше ФИО:\n(Пример: Алибек Матисов)');
 });
 
 bot.action('role_customer', (ctx) => {
   ctx.answerCbQuery();
   ctx.session.role = 'customer';
   ctx.session.step = 'awaiting_name';
-  ctx.editMessageText('🏢 Регистрация заказчика\n\nВведите имя и компанию:\n(Пример: Бекзат — ОсОО БишкекСтрой)');
+  ctx.editMessageText('🏢 Регистрация заказчика\n\nШаг 1/3: Введите ваше ФИО:\n(Пример: Бекзат Усупов)');
 });
 
 // ── /newtender ────────────────────────────────────────────────────────────────
@@ -264,41 +264,62 @@ bot.on('text', async (ctx) => {
   const text   = ctx.message.text.trim();
   const step   = ctx.session?.step;
 
-  // Регистрация: имя
+  // Регистрация: ФИО
   if (step === 'awaiting_name') {
     ctx.session.name = text;
+    ctx.session.step = 'awaiting_company';
+    const role = ctx.session.role;
+    return ctx.reply(
+      role === 'supplier'
+        ? '🏢 Шаг 2/3: Введите название компании:\n(Пример: ОсОО СтройСнаб)'
+        : '🏢 Шаг 2/3: Введите название компании:\n(Пример: ОсОО БишкекСтрой)'
+    );
+  }
+
+  // Регистрация: компания
+  if (step === 'awaiting_company') {
+    ctx.session.company = text;
     ctx.session.step = 'awaiting_phone';
-    return ctx.reply('📞 Введите номер телефона:\n(Пример: +996 700 123456)');
+    return ctx.reply('📞 Шаг 3/3: Введите номер телефона:\n(Пример: +996 700 123456)');
   }
 
   // Регистрация: телефон
   if (step === 'awaiting_phone') {
     ctx.session.phone = text;
     if (ctx.session.role === 'customer') {
-      ctx.session.step = 'awaiting_company';
-      return ctx.reply('🏢 Введите название компании:');
+      // Сохраняем заказчика — компания уже в session
+      await db.saveCustomer(chatId, {
+        name:    ctx.session.name,
+        phone:   ctx.session.phone,
+        company: ctx.session.company || '',
+      });
+      ctx.session.step = null;
+      return ctx.reply(
+        `✅ Регистрация завершена!\n\n` +
+        `👤 ${ctx.session.name}\n` +
+        `🏢 ${ctx.session.company}\n` +
+        `📞 ${ctx.session.phone}\n\n` +
+        `Используйте /newtender для тендера.`
+      );
     }
     ctx.session.step = 'awaiting_categories';
     const list = CATEGORIES.map((c, i) => `${i+1}. ${c.name} (${c.hint})`).join('\n');
     return ctx.reply(`📦 Выберите категории (номера через запятую):\n\n${list}\n\nПример: 1, 2, 3`);
   }
 
-  // Заказчик: компания
-  if (step === 'awaiting_company') {
-    await db.saveCustomer(chatId, { name: ctx.session.name, phone: ctx.session.phone, company: text });
-    ctx.session.step = null;
-    return ctx.reply(`✅ Регистрация завершена!\n\n👤 ${ctx.session.name}\n📞 ${ctx.session.phone}\n🏢 ${text}\n\nИспользуйте /newtender для тендера.`);
-  }
 
   // Поставщик: категории
   if (step === 'awaiting_categories') {
     const nums = text.split(',').map(n => parseInt(n.trim())-1).filter(n => n>=0 && n<CATEGORIES.length);
     if (!nums.length) return ctx.reply('⚠️ Укажите хотя бы одну категорию. Пример: 1, 2');
     const chosen = nums.map(n => CATEGORIES[n].id);
-    await db.saveSupplier(chatId, { name: ctx.session.name, phone: ctx.session.phone, categories: chosen });
+    const displayName = ctx.session.company
+      ? `${ctx.session.name} — ${ctx.session.company}`
+      : ctx.session.name;
+    await db.saveSupplier(chatId, { name: displayName, phone: ctx.session.phone, categories: chosen });
     ctx.session.step = null;
     const catNames = chosen.map(id => catById[id].name).join(', ');
-    return ctx.reply(`✅ Регистрация завершена!\n\n👤 ${ctx.session.name}\n📞 ${ctx.session.phone}\n📦 ${catNames}\n\nВы будете получать тендеры по вашим категориям.`);
+    return ctx.reply(`✅ Регистрация завершена!\n\n👤 ${ctx.session.name}\n🏢 ${ctx.session.company || '—'}\n📞 ${ctx.session.phone}\n📦 ${catNames}\n\nВы будете получать тендеры по вашим категориям.`);
   }
 
   // Тендер: шаги
