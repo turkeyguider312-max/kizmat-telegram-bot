@@ -279,17 +279,70 @@ bot.action('my_tenders', async (ctx) => {
 
 bot.action('edit_profile', async (ctx) => {
   ctx.answerCbQuery();
-  ctx.session = {};
   const chatId = ctx.chat.id;
   const sup = await db.getSupplier(chatId);
-  if (sup) {
-    ctx.session.role = 'supplier';
-    ctx.session.step = 'awaiting_name';
-    return ctx.editMessageText('✏️ Обновление профиля\n\nШаг 1/3: Введите ФИО:');
-  }
-  ctx.session.role = 'customer';
-  ctx.session.step = 'awaiting_name';
-  ctx.editMessageText('✏️ Обновление профиля\n\nШаг 1/3: Введите ФИО:');
+  const cus = await db.getCustomer(chatId);
+  const profile = sup || cus;
+  const name    = profile?.name || '—';
+  const phone   = profile?.phone || '—';
+  const company = sup ? '' : (cus?.company || '—');
+  const info    = sup
+    ? `👤 ${name}\n📞 ${phone}`
+    : `👤 ${name}\n🏢 ${company}\n📞 ${phone}`;
+
+  ctx.editMessageText(
+    `✏️ Что хотите изменить?\n\n${info}`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('👤 ФИО',      'edit_name')],
+      [Markup.button.callback('🏢 Компания', 'edit_company')],
+      [Markup.button.callback('📞 Телефон',  'edit_phone')],
+      [Markup.button.callback('← Назад',     sup ? 'back_supplier' : 'back_customer')],
+    ])
+  );
+});
+
+bot.action('back_supplier', async (ctx) => {
+  ctx.answerCbQuery();
+  const sup = await db.getSupplier(ctx.chat.id);
+  ctx.editMessageText(
+    `👋 С возвращением, ${sup?.name}!\n\nЧто хотите сделать?`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('📨 Посмотреть тендеры', 'view_tenders')],
+      [Markup.button.callback('🗂 Мой кабинет', 'my_cabinet')],
+      [Markup.button.callback('✏️ Изменить профиль', 'edit_profile')],
+    ])
+  );
+});
+
+bot.action('back_customer', async (ctx) => {
+  ctx.answerCbQuery();
+  const cus = await db.getCustomer(ctx.chat.id);
+  ctx.editMessageText(
+    `👋 С возвращением, ${cus?.name}!\n\nЧто хотите сделать?`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('➕ Создать тендер', 'new_tender')],
+      [Markup.button.callback('📋 Мои тендеры', 'my_tenders')],
+      [Markup.button.callback('✏️ Изменить профиль', 'edit_profile')],
+    ])
+  );
+});
+
+bot.action('edit_name', (ctx) => {
+  ctx.answerCbQuery();
+  ctx.session.step = 'edit_field_name';
+  ctx.editMessageText('👤 Введите новое ФИО:');
+});
+
+bot.action('edit_company', (ctx) => {
+  ctx.answerCbQuery();
+  ctx.session.step = 'edit_field_company';
+  ctx.editMessageText('🏢 Введите новое название компании:');
+});
+
+bot.action('edit_phone', (ctx) => {
+  ctx.answerCbQuery();
+  ctx.session.step = 'edit_field_phone';
+  ctx.editMessageText('📞 Введите новый номер телефона:');
 });
 
 bot.action('role_supplier', (ctx) => {
@@ -529,6 +582,45 @@ bot.on('text', async (ctx) => {
       qtyAvailable: draft.qtyAvailable, id: pid,
     });
     return;
+  }
+
+  // Редактирование профиля — отдельные поля
+  if (step === 'edit_field_name') {
+    const sup = await db.getSupplier(chatId);
+    const cus = await db.getCustomer(chatId);
+    if (sup) {
+      const newName = text.trim() + (sup.name.includes('—') ? ' — ' + sup.name.split('—').slice(1).join('—').trim() : '');
+      await pool.query('UPDATE suppliers SET name=$1 WHERE chat_id=$2::bigint', [text.trim(), n(chatId)]);
+    } else if (cus) {
+      await pool.query('UPDATE customers SET name=$1 WHERE chat_id=$2::bigint', [text.trim(), n(chatId)]);
+    }
+    ctx.session.step = null;
+    return ctx.reply(`✅ ФИО обновлено: ${text.trim()}`);
+  }
+
+  if (step === 'edit_field_company') {
+    const sup = await db.getSupplier(chatId);
+    const cus = await db.getCustomer(chatId);
+    if (sup) {
+      const fio     = sup.name.includes('—') ? sup.name.split('—')[0].trim() : sup.name;
+      const newName = `${fio} — ${text.trim()}`;
+      await pool.query('UPDATE suppliers SET name=$1 WHERE chat_id=$2::bigint', [newName, n(chatId)]);
+    } else if (cus) {
+      await pool.query('UPDATE customers SET company=$1 WHERE chat_id=$2::bigint', [text.trim(), n(chatId)]);
+    }
+    ctx.session.step = null;
+    return ctx.reply(`✅ Компания обновлена: ${text.trim()}`);
+  }
+
+  if (step === 'edit_field_phone') {
+    const sup = await db.getSupplier(chatId);
+    if (sup) {
+      await pool.query('UPDATE suppliers SET phone=$1 WHERE chat_id=$2::bigint', [text.trim(), n(chatId)]);
+    } else {
+      await pool.query('UPDATE customers SET phone=$1 WHERE chat_id=$2::bigint', [text.trim(), n(chatId)]);
+    }
+    ctx.session.step = null;
+    return ctx.reply(`✅ Телефон обновлён: ${text.trim()}`);
   }
 
   // Рейтинг: комментарий
