@@ -181,7 +181,7 @@ bot.start(async (ctx) => {
   }
 
   ctx.reply(
-    '🏗 Добро пожаловать в Кызмат.kg B2B!\n\nКем вы являетесь?',
+    '🏗 Добро пожаловать в Kizmat.kg B2B!\n\nКем вы являетесь?',
     Markup.inlineKeyboard([
       [Markup.button.callback('📦 Я поставщик', 'role_supplier')],
       [Markup.button.callback('🏢 Я заказчик',  'role_customer')],
@@ -713,13 +713,13 @@ app.get('/dashboard', async (req, res) => {
 
   res.send(`<!DOCTYPE html>
 <html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Кызмат.kg — Тендеры</title>
+<title>Kizmat.kg — Тендеры</title>
 <style>${DASH_CSS}</style></head>
 <body>
 
 <!-- Topbar (как в Синтека) -->
 <div class="topbar">
-  <div class="logo">🏗 Kyzmat.kg</div>
+  <div class="logo">🏗 Kizmat.kg</div>
   <nav>
     <a href="/dashboard" class="active">Тендеры</a>
   </nav>
@@ -1104,12 +1104,12 @@ app.get('/api/proposals/:tenderId', async (req, res) => {
   res.json({ ok: true, proposals: await db.getProposals(req.params.tenderId) });
 });
 
-app.get('/', (req, res) => res.json({ ok: true, service: 'Kyzmat.kg B2B Bot', version: '4.0' }));
+app.get('/', (req, res) => res.json({ ok: true, service: 'Kizmat.kg B2B Bot', version: '4.0' }));
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => console.log(`🌐 API + Dashboard: порт ${PORT}`));
-  bot.launch().then(() => console.log('🏗 Кызмат.kg B2B Bot v4.0 запущен'));
+  bot.launch().then(() => console.log('🏗 Kizmat.kg B2B Bot v4.0 запущен'));
 }).catch(err => { console.error('❌', err.message); process.exit(1); });
 
 process.once('SIGINT',  () => bot.stop('SIGINT'));
