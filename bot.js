@@ -581,60 +581,210 @@ const CSS = `
   .score-badge{display:inline-block;background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:12px;font-size:12px;font-weight:700}
 `;
 
-// Dashboard — главная
+// Dashboard — главная (Sinteka-style procurement dashboard)
 app.get('/dashboard', async (req, res) => {
-  const catFilter = req.query.cat || '';
-  const sortBy    = req.query.sort || 'new';
+  const catFilter    = req.query.cat    || '';
+  const statusFilter = req.query.status || '';
+  const search       = (req.query.q    || '').toLowerCase();
+  const sortBy       = req.query.sort  || 'date';
+
   let tenders = await db.getAllTenders();
-  if (catFilter) tenders = tenders.filter(t => t.category_id === catFilter);
+  if (catFilter)                  tenders = tenders.filter(t => t.category_id === catFilter);
+  if (statusFilter === 'active')  tenders = tenders.filter(t => t.status !== 'closed');
+  if (statusFilter === 'closed')  tenders = tenders.filter(t => t.status === 'closed');
+  if (search) tenders = tenders.filter(t =>
+    t.title.toLowerCase().includes(search) || t.id.toLowerCase().includes(search)
+  );
+
   const rows = await Promise.all(tenders.map(async t => {
     const props  = await db.getProposals(t.id);
     const cat    = catById[t.category_id]?.name || t.category_id;
     const st     = tenderStatus(t, props.length);
     const scored = scoreProposals(props);
-    const best   = scored[0] ? `🥇 ${scored[0].price}` : '—';
-    return { t, props, cat, st, best };
+    const best   = scored[0];
+    const rated  = props.filter(p => p.rating).length;
+    return { t, props, cat, st, best, rated, scored };
   }));
-  if (sortBy === 'active') rows.sort((a,b) => b.props.length - a.props.length);
+
+  if (sortBy === 'props')  rows.sort((a,b) => b.props.length - a.props.length);
+  if (sortBy === 'budget') rows.sort((a,b) => parsePrice(b.t.budget) - parsePrice(a.t.budget));
+
+  // Сводная статистика
+  const totalTenders = rows.length;
+  const openTenders  = rows.filter(r => r.st.cls === 'open' || r.st.cls === 'closing').length;
+  const totalProps   = rows.reduce((s, r) => s + r.props.length, 0);
+  const needsAction  = rows.filter(r => r.props.length > 0 && r.st.cls !== 'won').length;
 
   const catOptions = CATEGORIES.map(c =>
     `<option value="${c.id}" ${catFilter===c.id?'selected':''}>${c.name}</option>`
   ).join('');
 
-  const tableRows = rows.map(({ t, props, cat, st, best }) => `
-    <tr>
-      <td><a href="/dashboard/tender/${t.id}"><b>${t.id}</b></a></td>
-      <td>${t.title}</td>
-      <td><span style="font-size:12px;color:#64748b">${cat}</span></td>
-      <td>${t.budget}</td>
-      <td style="font-size:13px;color:#64748b">${t.deadline}</td>
-      <td><b>${props.length}</b>${props.length?` <span style="color:#15803d;font-size:12px">${best}</span>`:''}</td>
+  // Строки таблицы
+  const tableRows = rows.map(({ t, props, cat, st, best, rated, scored }) => {
+    // Pipeline-бары (как в Синтека): поданные / без выбора / завершённые
+    const pending  = props.length - rated;
+    const pipeline = `
+      <div class="pipeline">
+        ${props.length  ? `<span class="pip-new"  title="Всего предложений">${props.length}</span>` : '<span class="pip-zero">—</span>'}
+        ${pending > 0   ? `<span class="pip-pend" title="Ожидают выбора">${pending}</span>` : ''}
+        ${rated > 0     ? `<span class="pip-done" title="Оценены/Завершены">${rated}</span>` : ''}
+      </div>`;
+
+    const bestCell = best
+      ? `<div style="font-weight:700;color:#15803d">${best.price}</div>
+         <div style="font-size:11px;color:#64748b">${best.supplier_name}</div>`
+      : `<span style="color:#cbd5e1">нет</span>`;
+
+    const lastAct = props.length
+      ? new Date(Math.max(...props.map(p => new Date(p.submitted_at)))).toLocaleDateString('ru-RU')
+      : new Date(t.created_at).toLocaleDateString('ru-RU');
+
+    return `<tr>
+      <td style="font-weight:700;color:#1e40af;white-space:nowrap">
+        <a href="/dashboard/tender/${t.id}" style="color:#1e40af">${t.id}</a>
+      </td>
+      <td>
+        <div style="font-weight:600;font-size:14px">${t.title}</div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px">${cat}</div>
+      </td>
+      <td style="font-size:13px;color:#475569">${t.budget}</td>
+      <td style="font-size:12px;color:#64748b;white-space:nowrap">${t.deadline}</td>
+      <td>${pipeline}</td>
+      <td>${bestCell}</td>
       <td><span class="badge ${st.cls}">${st.label}</span></td>
-      <td><a href="/dashboard/tender/${t.id}">Открыть →</a></td>
-    </tr>`).join('') || `<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:32px">Тендеров пока нет</td></tr>`;
+      <td style="font-size:12px;color:#94a3b8;white-space:nowrap">${lastAct}</td>
+      <td>
+        <a class="btn-action" href="/dashboard/tender/${t.id}">Предложения</a>
+      </td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="9" style="text-align:center;color:#94a3b8;padding:40px;font-size:15px">Тендеров нет — создайте первый в боте @kizmattbot</td></tr>`;
+
+  const DASH_CSS = `
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;color:#1e293b}
+    /* Topbar */
+    .topbar{background:#1565c0;display:flex;align-items:center;padding:0 24px;height:52px;gap:0}
+    .topbar .logo{color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.5px;margin-right:32px;display:flex;align-items:center;gap:8px}
+    .topbar nav{display:flex;height:100%}
+    .topbar nav a{color:rgba(255,255,255,.75);font-size:14px;font-weight:500;padding:0 18px;display:flex;align-items:center;border-bottom:3px solid transparent;text-decoration:none;transition:all .15s}
+    .topbar nav a.active,.topbar nav a:hover{color:#fff;border-bottom-color:#fff}
+    .topbar .user{margin-left:auto;color:rgba(255,255,255,.8);font-size:13px;display:flex;align-items:center;gap:8px}
+    /* Toolbar */
+    .toolbar{background:#fff;border-bottom:1px solid #e2e8f0;padding:10px 24px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .btn-create{background:#1565c0;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+    .btn-create:hover{background:#1251a3}
+    .search-wrap{display:flex;gap:6px;flex:1;min-width:200px}
+    .search-wrap input{flex:1;border:1px solid #cbd5e1;border-radius:6px;padding:7px 12px;font-size:13px;outline:none}
+    .search-wrap input:focus{border-color:#1565c0}
+    .search-wrap button{background:#1565c0;color:#fff;border:none;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer}
+    .toolbar select{border:1px solid #cbd5e1;border-radius:6px;padding:7px 10px;font-size:13px;background:#fff;outline:none}
+    /* Stats bar */
+    .statsbar{background:#fff;border-bottom:1px solid #e2e8f0;padding:8px 24px;display:flex;gap:28px}
+    .stat-item{display:flex;align-items:center;gap:6px;font-size:13px;color:#475569}
+    .stat-item b{color:#1e293b}
+    .stat-item .dot{width:8px;height:8px;border-radius:50%}
+    /* Table */
+    .tbl-wrap{padding:16px 24px}
+    .tbl-info{font-size:13px;color:#64748b;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+    th{background:#1e3a8a;color:#fff;padding:10px 14px;text-align:left;font-size:12px;font-weight:600;white-space:nowrap}
+    td{padding:11px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top}
+    tr:last-child td{border:none}
+    tr:hover td{background:#f8faff}
+    /* Pipeline badges */
+    .pipeline{display:flex;gap:4px;align-items:center}
+    .pip-new{background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;min-width:24px;text-align:center}
+    .pip-pend{background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;min-width:24px;text-align:center}
+    .pip-done{background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;min-width:24px;text-align:center}
+    .pip-zero{color:#cbd5e1;font-size:13px}
+    /* Status badges */
+    .badge{display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600}
+    .open{background:#dcfce7;color:#15803d}
+    .closing{background:#fef9c3;color:#854d0e}
+    .expired{background:#fee2e2;color:#b91c1c}
+    .won{background:#ede9fe;color:#6d28d9}
+    /* Actions */
+    .btn-action{display:inline-block;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;background:#eff6ff;color:#1d4ed8;text-decoration:none;white-space:nowrap}
+    .btn-action:hover{background:#dbeafe}
+    /* Legend */
+    .legend{display:flex;gap:16px;padding:8px 24px 16px;font-size:12px;color:#64748b}
+    .legend span{display:flex;align-items:center;gap:4px}
+  `;
 
   res.send(`<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><title>Кызмат.kg — Дашборд</title>
-<style>${CSS}</style></head>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Кызмат.kg — Тендеры</title>
+<style>${DASH_CSS}</style></head>
 <body>
-<div class="hdr"><span style="font-size:28px">🏗</span><h1>Кызмат.kg B2B — Кабинет заказчика</h1></div>
-<div class="wrap">
-  <div class="filters">
-    <form method="get" style="display:flex;gap:10px;flex-wrap:wrap">
-      <select name="cat" onchange="this.form.submit()">
-        <option value="">Все категории</option>${catOptions}
-      </select>
-      <select name="sort" onchange="this.form.submit()">
-        <option value="new" ${sortBy==='new'?'selected':''}>Новые сначала</option>
-        <option value="active" ${sortBy==='active'?'selected':''}>По активности</option>
-      </select>
-    </form>
+
+<!-- Topbar (как в Синтека) -->
+<div class="topbar">
+  <div class="logo">🏗 Kyzmat.kg</div>
+  <nav>
+    <a href="/dashboard" class="active">Тендеры</a>
+  </nav>
+  <div class="user">📱 @kizmattbot</div>
+</div>
+
+<!-- Toolbar: создать + поиск + фильтры -->
+<form method="get" action="/dashboard">
+<div class="toolbar">
+  <a class="btn-create" href="https://t.me/kizmattbot" target="_blank">+ Создать тендер</a>
+  <div class="search-wrap">
+    <input name="q" value="${search}" placeholder="Поиск по названию или ID...">
+    <button type="submit">Найти</button>
   </div>
+  <select name="cat" onchange="this.form.submit()">
+    <option value="">Все категории</option>${catOptions}
+  </select>
+  <select name="status" onchange="this.form.submit()">
+    <option value="" ${!statusFilter?'selected':''}>Все статусы</option>
+    <option value="active" ${statusFilter==='active'?'selected':''}>Активные</option>
+    <option value="closed" ${statusFilter==='closed'?'selected':''}>Завершённые</option>
+  </select>
+  <select name="sort" onchange="this.form.submit()">
+    <option value="date"   ${sortBy==='date'  ?'selected':''}>По дате</option>
+    <option value="props"  ${sortBy==='props' ?'selected':''}>По предложениям</option>
+    <option value="budget" ${sortBy==='budget'?'selected':''}>По бюджету</option>
+  </select>
+</div>
+</form>
+
+<!-- Сводная статистика -->
+<div class="statsbar">
+  <div class="stat-item"><div class="dot" style="background:#1565c0"></div>Всего тендеров: <b>${totalTenders}</b></div>
+  <div class="stat-item"><div class="dot" style="background:#15803d"></div>Активных: <b>${openTenders}</b></div>
+  <div class="stat-item"><div class="dot" style="background:#d97706"></div>Предложений получено: <b>${totalProps}</b></div>
+  <div class="stat-item"><div class="dot" style="background:#dc2626"></div>Ожидают выбора: <b>${needsAction}</b></div>
+</div>
+
+<!-- Таблица -->
+<div class="tbl-wrap">
+  <div class="tbl-info">Тендеров в списке: <b>${rows.length}</b></div>
   <table>
-    <thead><tr><th>ID</th><th>Название</th><th>Категория</th><th>Бюджет</th><th>Срок</th><th>Предложений</th><th>Статус</th><th></th></tr></thead>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Название / Категория</th>
+        <th>Бюджет</th>
+        <th>Срок подачи</th>
+        <th style="white-space:nowrap">
+          Предложения
+          <div style="font-weight:400;font-size:10px;margin-top:2px;opacity:.8">
+            🔵 всего &nbsp; 🟡 ожидают &nbsp; 🟢 завершены
+          </div>
+        </th>
+        <th>Лучшая цена</th>
+        <th>Статус</th>
+        <th>Активность</th>
+        <th></th>
+      </tr>
+    </thead>
     <tbody>${tableRows}</tbody>
   </table>
-</div></body></html>`);
+</div>
+
+</body></html>`);
 });
 
 // Детали тендера — с ранжированием и коридором цен
