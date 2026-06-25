@@ -58,11 +58,31 @@ async function initDB() {
     );
     CREATE SEQUENCE IF NOT EXISTS tender_seq START 1;
   `);
-  // Добавляем новые поля если их ещё нет (безопасно для существующей БД)
+  // Новые поля (безопасно для существующей БД)
   await pool.query(`
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_type TEXT;
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_days INTEGER;
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS qty_available TEXT;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS inn TEXT;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS contact TEXT;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS position_title TEXT;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS email TEXT;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS plan TEXT;
+  `);
+  // Заявки с сайта (заказчики)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS web_requests (
+      id          SERIAL PRIMARY KEY,
+      company     TEXT NOT NULL,
+      inn         TEXT,
+      contact     TEXT,
+      category    TEXT,
+      description TEXT,
+      delivery    TEXT,
+      deadline    TEXT,
+      phone       TEXT NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
   `);
   console.log('✅ База данных готова');
 }
@@ -1469,22 +1489,228 @@ document.querySelectorAll('input[name=categories]').forEach(cb => {
 // API: веб-регистрация поставщика
 app.post('/api/register-supplier', async (req, res) => {
   if (!checkSecret(req, res)) return;
-  const { name, phone, categories, supplierId } = req.body;
-  if (!name || !phone || !categories?.length) {
-    return res.status(400).json({ error: 'name, phone и categories обязательны' });
+  const { company, inn, contact, position, categories, phone, email, plan } = req.body;
+  if (!company || !phone || !categories?.length) {
+    return res.status(400).json({ error: 'company, phone и categories обязательны' });
   }
-  const sid = supplierId || ('web_' + Date.now());
-  // Сохраняем без chat_id — он добавится когда откроет бота
-  // Для этого используем временный ID как supplier_id
+  const sid = 'web_' + Date.now();
+  const fakeChatId = -Date.now(); // уникальный отрицательный ID для веб-регистрантов
+  const fullName = contact ? `${contact} — ${company}` : company;
   const botUsername = process.env.BOT_USERNAME || 'kizmattbot';
   const botLink = `https://t.me/${botUsername}?start=sup_${sid}`;
-  // Сохраняем данные в pending-таблице (используем supplier_id как ключ)
   await pool.query(`
-    INSERT INTO suppliers(chat_id, name, phone, categories, supplier_id)
-    VALUES(0, $1, $2, $3, $4)
-    ON CONFLICT DO NOTHING
-  `, [name, phone, categories, sid]).catch(() => {});
-  res.json({ ok: true, botLink, supplierId: sid });
+    INSERT INTO suppliers(chat_id, name, phone, categories, supplier_id, inn, contact, position_title, email, plan)
+    VALUES($1::bigint, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  `, [fakeChatId, fullName, phone, categories, sid, inn||'', contact||'', position||'', email||'', plan||'']);
+  res.json({ ok: true, supplierId: sid });
+});
+
+// API: веб-заявка заказчика
+app.post('/api/register-customer', async (req, res) => {
+  if (!checkSecret(req, res)) return;
+  const { company, inn, contact, category, description, delivery, deadline, phone } = req.body;
+  if (!company || !phone) {
+    return res.status(400).json({ error: 'company и phone обязательны' });
+  }
+  const r = await pool.query(
+    `INSERT INTO web_requests(company, inn, contact, category, description, delivery, deadline, phone)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [company, inn||'', contact||'', category||'', description||'', delivery||'', deadline||'', phone]
+  );
+  res.json({ ok: true, requestId: r.rows[0].id });
+});
+
+// ─── Веб-кабинет поставщика (зарегистрировался через сайт) ────────────────────
+app.get('/dashboard/web-supplier/:supplierId', async (req, res) => {
+  const r = await pool.query('SELECT * FROM suppliers WHERE supplier_id=$1', [req.params.supplierId]);
+  const sup = r.rows[0];
+  if (!sup) return res.status(404).send('Поставщик не найден');
+  const botUsername = process.env.BOT_USERNAME || 'kizmattbot';
+  const botLink = `https://t.me/${botUsername}?start=sup_${sup.supplier_id}`;
+  const cats = (sup.categories || []).join(', ') || '—';
+  const createdAt = sup.created_at ? new Date(sup.created_at).toLocaleDateString('ru-RU') : '—';
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Кабинет поставщика — Kizmat.kg</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;color:#1e293b}
+  .topbar{background:#1565c0;display:flex;align-items:center;padding:0 24px;height:52px}
+  .logo{color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.5px}
+  .wrap{max-width:680px;margin:40px auto;padding:0 16px}
+  .card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:32px;margin-bottom:20px}
+  .card h2{font-size:18px;font-weight:700;margin-bottom:20px;color:#1e293b;border-bottom:1px solid #f1f5f9;padding-bottom:12px}
+  .row{display:flex;gap:8px;margin-bottom:12px;font-size:14px}
+  .row label{width:160px;color:#64748b;flex-shrink:0}
+  .row span{font-weight:500}
+  .badge-cat{display:inline-block;background:#dbeafe;color:#1d4ed8;padding:3px 10px;border-radius:10px;font-size:12px;font-weight:600;margin:2px}
+  .tg-btn{display:inline-flex;align-items:center;gap:10px;background:#229ED9;color:#fff;padding:14px 24px;border-radius:10px;font-size:15px;font-weight:600;text-decoration:none;margin-top:8px}
+  .tg-btn:hover{background:#1a8fc4}
+  .notice{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:16px;font-size:14px;color:#713f12;margin-bottom:20px}
+</style></head><body>
+<div class="topbar"><div class="logo">🏗 Kizmat.kg</div></div>
+<div class="wrap">
+  <div class="notice">
+    ✅ <b>Регистрация прошла успешно!</b> Подключите Telegram-бот, чтобы получать заявки от заказчиков.
+  </div>
+  <div class="card">
+    <h2>Профиль поставщика</h2>
+    <div class="row"><label>Компания</label><span>${sup.name || '—'}</span></div>
+    <div class="row"><label>ИНН</label><span>${sup.inn || '—'}</span></div>
+    <div class="row"><label>Контакт</label><span>${sup.contact || '—'}</span></div>
+    <div class="row"><label>Должность</label><span>${sup.position_title || '—'}</span></div>
+    <div class="row"><label>Телефон</label><span>${sup.phone || '—'}</span></div>
+    <div class="row"><label>Email</label><span>${sup.email || '—'}</span></div>
+    <div class="row"><label>Тариф</label><span>${sup.plan || '—'}</span></div>
+    <div class="row"><label>Дата регистрации</label><span>${createdAt}</span></div>
+    <div class="row"><label>Категории</label>
+      <span>${(sup.categories||[]).map(c=>`<span class="badge-cat">${c}</span>`).join('')||'—'}</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Подключить Telegram-бот</h2>
+    <p style="font-size:14px;color:#475569;margin-bottom:16px">Нажмите кнопку ниже чтобы открыть бот и активировать доступ к тендерам. После этого заявки будут приходить вам в Telegram моментально.</p>
+    <a href="${botLink}" class="tg-btn">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221l-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.527 14.947l-2.99-.937c-.648-.204-.66-.648.136-.960l11.658-4.491c.54-.194 1.010.133.837.958l.726-1.296z"/></svg>
+      Открыть @${botUsername}
+    </a>
+  </div>
+</div>
+</body></html>`);
+});
+
+// ─── Веб-кабинет заказчика (подал заявку через сайт) ──────────────────────────
+app.get('/dashboard/web-customer/:requestId', async (req, res) => {
+  const r = await pool.query('SELECT * FROM web_requests WHERE id=$1', [req.params.requestId]);
+  const req_ = r.rows[0];
+  if (!req_) return res.status(404).send('Заявка не найдена');
+  const createdAt = req_.created_at ? new Date(req_.created_at).toLocaleDateString('ru-RU') : '—';
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ваша заявка — Kizmat.kg</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;color:#1e293b}
+  .topbar{background:#1565c0;display:flex;align-items:center;padding:0 24px;height:52px}
+  .logo{color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.5px}
+  .wrap{max-width:680px;margin:40px auto;padding:0 16px}
+  .card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:32px;margin-bottom:20px}
+  .card h2{font-size:18px;font-weight:700;margin-bottom:20px;color:#1e293b;border-bottom:1px solid #f1f5f9;padding-bottom:12px}
+  .row{display:flex;gap:8px;margin-bottom:12px;font-size:14px}
+  .row label{width:160px;color:#64748b;flex-shrink:0}
+  .row span{font-weight:500}
+  .status-pill{display:inline-block;background:#dcfce7;color:#15803d;padding:4px 14px;border-radius:20px;font-size:13px;font-weight:700}
+  .notice{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;font-size:14px;color:#1e40af;margin-bottom:20px}
+</style></head><body>
+<div class="topbar"><div class="logo">🏗 Kizmat.kg</div></div>
+<div class="wrap">
+  <div class="notice">
+    ✅ <b>Заявка принята!</b> Поставщики получат уведомление и пришлют предложения в течение 24 часов.
+  </div>
+  <div class="card">
+    <h2>Ваша заявка <span class="status-pill">Активна</span></h2>
+    <div class="row"><label>Компания</label><span>${req_.company}</span></div>
+    <div class="row"><label>ИНН</label><span>${req_.inn || '—'}</span></div>
+    <div class="row"><label>Контакт</label><span>${req_.contact || '—'}</span></div>
+    <div class="row"><label>Телефон</label><span>${req_.phone}</span></div>
+    <div class="row"><label>Категория</label><span>${req_.category || '—'}</span></div>
+    <div class="row"><label>Описание</label><span>${req_.description || '—'}</span></div>
+    <div class="row"><label>Адрес доставки</label><span>${req_.delivery || '—'}</span></div>
+    <div class="row"><label>Срок поставки</label><span>${req_.deadline || '—'}</span></div>
+    <div class="row"><label>Дата подачи</label><span>${createdAt}</span></div>
+  </div>
+  <div class="card">
+    <h2>Что дальше?</h2>
+    <p style="font-size:14px;color:#475569;line-height:1.6">
+      Ваша заявка отправлена поставщикам по выбранной категории.<br><br>
+      В течение 24 часов с вами свяжутся по номеру <b>${req_.phone}</b> для уточнения деталей и предоставления коммерческих предложений.
+    </p>
+  </div>
+</div>
+</body></html>`);
+});
+
+// ─── Админ-дашборд ────────────────────────────────────────────────────────────
+app.get('/admin', async (req, res) => {
+  const suppliersRes = await pool.query('SELECT * FROM suppliers ORDER BY created_at DESC');
+  const requestsRes  = await pool.query('SELECT * FROM web_requests ORDER BY created_at DESC');
+  const suppliers = suppliersRes.rows;
+  const requests  = requestsRes.rows;
+
+  const supRows = suppliers.map(s => {
+    const cats = (s.categories||[]).join(', ') || '—';
+    const date = s.created_at ? new Date(s.created_at).toLocaleDateString('ru-RU') : '—';
+    const source = s.chat_id > 0 ? '🤖 Telegram' : '🌐 Сайт';
+    return `<tr>
+      <td>${s.name||'—'}</td>
+      <td>${s.phone||'—'}</td>
+      <td>${s.email||'—'}</td>
+      <td style="max-width:200px;font-size:12px">${cats}</td>
+      <td>${s.plan||'—'}</td>
+      <td>${source}</td>
+      <td style="font-size:12px;color:#64748b;white-space:nowrap">${date}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:30px">Нет поставщиков</td></tr>`;
+
+  const reqRows = requests.map(r => {
+    const date = r.created_at ? new Date(r.created_at).toLocaleDateString('ru-RU') : '—';
+    return `<tr>
+      <td>${r.company}</td>
+      <td>${r.contact||'—'}</td>
+      <td>${r.phone}</td>
+      <td>${r.category||'—'}</td>
+      <td style="max-width:220px;font-size:12px">${r.description||'—'}</td>
+      <td>${r.delivery||'—'}</td>
+      <td>${r.deadline||'—'}</td>
+      <td style="font-size:12px;color:#64748b;white-space:nowrap">${date}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:30px">Нет заявок</td></tr>`;
+
+  res.send(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Админ — Kizmat.kg</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;color:#1e293b}
+  .topbar{background:#1565c0;display:flex;align-items:center;padding:0 24px;height:52px;gap:32px}
+  .logo{color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.5px}
+  .topbar nav a{color:rgba(255,255,255,.75);font-size:14px;font-weight:500;text-decoration:none;padding:4px 0;border-bottom:2px solid transparent}
+  .topbar nav a:hover{color:#fff;border-bottom-color:#fff}
+  .section{padding:24px}
+  .section h2{font-size:16px;font-weight:700;margin-bottom:14px;color:#1e293b;display:flex;align-items:center;gap:8px}
+  .count{background:#dbeafe;color:#1d4ed8;padding:2px 10px;border-radius:10px;font-size:13px;font-weight:700}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06);margin-bottom:32px}
+  th{background:#1e3a8a;color:#fff;padding:10px 14px;text-align:left;font-size:12px;font-weight:600;white-space:nowrap}
+  td{padding:10px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top}
+  tr:last-child td{border:none}
+  tr:hover td{background:#f8faff}
+</style></head><body>
+<div class="topbar">
+  <div class="logo">🏗 Kizmat.kg</div>
+  <nav>
+    <a href="/dashboard">Тендеры</a>
+  </nav>
+</div>
+<div class="section">
+  <h2>Поставщики <span class="count">${suppliers.length}</span></h2>
+  <table>
+    <thead><tr>
+      <th>Имя / Компания</th><th>Телефон</th><th>Email</th>
+      <th>Категории</th><th>Тариф</th><th>Источник</th><th>Дата</th>
+    </tr></thead>
+    <tbody>${supRows}</tbody>
+  </table>
+
+  <h2>Заявки заказчиков <span class="count">${requests.length}</span></h2>
+  <table>
+    <thead><tr>
+      <th>Компания</th><th>Контакт</th><th>Телефон</th>
+      <th>Категория</th><th>Описание</th><th>Адрес</th><th>Срок</th><th>Дата</th>
+    </tr></thead>
+    <tbody>${reqRows}</tbody>
+  </table>
+</div>
+</body></html>`);
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
