@@ -169,17 +169,55 @@ bot.start(async (ctx) => {
   const chatId  = ctx.chat.id;
   ctx.session   = {};
 
+  // Deep link с сайта — привязка аккаунта поставщика
   if (payload?.startsWith('sup_')) {
     await pool.query(`
       INSERT INTO suppliers(chat_id,supplier_id) VALUES($1::bigint,$2)
       ON CONFLICT(chat_id) DO UPDATE SET supplier_id=$2
     `, [n(chatId), payload]);
-    await ctx.reply('🔗 Аккаунт привязан к kizmat.kg!\n\nВведите ваше имя и компанию:');
+    // Если уже зарегистрирован — показать меню
+    const existing = await db.getSupplier(chatId);
+    if (existing?.name) {
+      return ctx.reply(
+        `🔗 Аккаунт привязан к kizmat.kg!\n\n👤 ${existing.name}\n📞 ${existing.phone}\n\nЧто хотите сделать?`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('📋 Мои предложения', 'my_proposals')],
+          [Markup.button.callback('🗂 Мой кабинет', 'my_cabinet')],
+        ])
+      );
+    }
+    await ctx.reply('🔗 Аккаунт привязан!\n\nШаг 1/3: Введите ваше ФИО:');
     ctx.session.step = 'awaiting_name';
     ctx.session.role = 'supplier';
     return;
   }
 
+  // Проверяем — уже зарегистрирован?
+  const [sup, cus] = await Promise.all([db.getSupplier(chatId), db.getCustomer(chatId)]);
+
+  if (sup?.name) {
+    return ctx.reply(
+      `👋 С возвращением, ${sup.name}!\n\nЧто хотите сделать?`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📨 Посмотреть тендеры', 'view_tenders')],
+        [Markup.button.callback('🗂 Мой кабинет', 'my_cabinet')],
+        [Markup.button.callback('✏️ Изменить профиль', 'edit_profile')],
+      ])
+    );
+  }
+
+  if (cus?.name) {
+    return ctx.reply(
+      `👋 С возвращением, ${cus.name}!\n\nЧто хотите сделать?`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ Создать тендер', 'new_tender')],
+        [Markup.button.callback('📋 Мои тендеры', 'my_tenders')],
+        [Markup.button.callback('✏️ Изменить профиль', 'edit_profile')],
+      ])
+    );
+  }
+
+  // Новый пользователь — выбор роли
   ctx.reply(
     '🏗 Добро пожаловать в Kizmat.kg B2B!\n\nКем вы являетесь?',
     Markup.inlineKeyboard([
@@ -187,6 +225,71 @@ bot.start(async (ctx) => {
       [Markup.button.callback('🏢 Я заказчик',  'role_customer')],
     ])
   );
+});
+
+// Меню уже зарегистрированных
+bot.action('view_tenders', async (ctx) => {
+  ctx.answerCbQuery();
+  const chatId = ctx.chat.id;
+  const r = await pool.query('SELECT * FROM tenders ORDER BY created_at DESC LIMIT 5');
+  if (!r.rows.length) return ctx.editMessageText('Тендеров пока нет. Ждите уведомлений!');
+  const list = r.rows.map(t => `📦 #${t.id} — ${t.title}\n💰 Бюджет: ${t.budget}\n⏰ Срок: ${t.deadline}`).join('\n\n');
+  ctx.editMessageText(`📋 Последние тендеры:\n\n${list}`);
+});
+
+bot.action('my_cabinet', async (ctx) => {
+  ctx.answerCbQuery();
+  const chatId = ctx.chat.id;
+  const base = process.env.APP_URL || 'https://worker-production-d53d.up.railway.app';
+  const sup = await db.getSupplier(chatId);
+  const cus = await db.getCustomer(chatId);
+  if (sup) return ctx.editMessageText(`🗂 Ваш кабинет:\n${base}/dashboard/supplier/${chatId}`);
+  if (cus) return ctx.editMessageText(`🗂 Дашборд заказчика:\n${base}/dashboard`);
+  ctx.editMessageText('Профиль не найден. /start');
+});
+
+bot.action('my_proposals', async (ctx) => {
+  ctx.answerCbQuery();
+  const chatId = ctx.chat.id;
+  const r = await pool.query(
+    'SELECT p.*, t.title FROM proposals p JOIN tenders t ON p.tender_id=t.id WHERE p.supplier_chat_id=$1::bigint ORDER BY p.submitted_at DESC LIMIT 5',
+    [n(chatId)]
+  );
+  if (!r.rows.length) return ctx.editMessageText('Предложений пока нет.');
+  const list = r.rows.map(p => `📦 ${p.tender_id} — ${p.title}\n💰 ${p.price} | ⏱ ${p.delivery_days}`).join('\n\n');
+  ctx.editMessageText(`📋 Ваши последние предложения:\n\n${list}`);
+});
+
+bot.action('new_tender', async (ctx) => {
+  ctx.answerCbQuery();
+  ctx.session.step = 'tender_category';
+  ctx.session.tenderDraft = {};
+  const list = CATEGORIES.map((c, i) => `${i+1}. ${c.name} (${c.hint})`).join('\n');
+  ctx.editMessageText(`➕ Новый тендер\n\nШаг 1/5: Выберите категорию (введите номер):\n\n${list}`);
+});
+
+bot.action('my_tenders', async (ctx) => {
+  ctx.answerCbQuery();
+  const chatId = ctx.chat.id;
+  const r = await pool.query('SELECT * FROM tenders WHERE customer_id=$1::bigint ORDER BY created_at DESC LIMIT 5', [n(chatId)]);
+  if (!r.rows.length) return ctx.editMessageText('Тендеров пока нет. Нажмите «Создать тендер».');
+  const list = r.rows.map(t => `📦 #${t.id} — ${t.title}\nБюджет: ${t.budget} | Срок: ${t.deadline}`).join('\n\n');
+  ctx.editMessageText(`📋 Ваши тендеры:\n\n${list}`);
+});
+
+bot.action('edit_profile', async (ctx) => {
+  ctx.answerCbQuery();
+  ctx.session = {};
+  const chatId = ctx.chat.id;
+  const sup = await db.getSupplier(chatId);
+  if (sup) {
+    ctx.session.role = 'supplier';
+    ctx.session.step = 'awaiting_name';
+    return ctx.editMessageText('✏️ Обновление профиля\n\nШаг 1/3: Введите ФИО:');
+  }
+  ctx.session.role = 'customer';
+  ctx.session.step = 'awaiting_name';
+  ctx.editMessageText('✏️ Обновление профиля\n\nШаг 1/3: Введите ФИО:');
 });
 
 bot.action('role_supplier', (ctx) => {
